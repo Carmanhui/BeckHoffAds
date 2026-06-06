@@ -1,0 +1,518 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+
+namespace AdsHelper
+{
+    public class TpyHelper
+    {
+        #region 字段属性
+        public XNamespace ns;
+        public Dictionary<string, PlcType> DataTypes = new Dictionary<string, PlcType>();
+        public List<PlcVariable> GlobalVariables = new List<PlcVariable>();
+        public List<string> libraryNames = new List<string>();
+        public List<string> DataTypeWithTypes = new List<string>();
+        #endregion
+
+
+
+        #region 从tpy中提取断电保持变量
+        public void Parse(string filePath)
+        {
+            XDocument doc = XDocument.Load(filePath); 
+            XElement root = doc.Root;
+            ns = root.GetDefaultNamespace();
+            //解析所有库集合
+            var libraryElement = root.Descendants(ns + "ProjectInfo").FirstOrDefault();
+            if (libraryElement!=null)
+            {
+                libraryNames.Clear();
+                foreach (var dtElement in libraryElement.Elements(ns+"Library"))
+                {
+                    var name = (string)dtElement.Element("Name");
+                    libraryNames.Add(name.Split(',')[0].ToLower());
+                }
+            }
+            //解析所有类型集合
+            var dataTypeElement = root.Descendants(ns + "DataTypes").FirstOrDefault();
+            if (dataTypeElement != null)
+            {
+                //解析所有类型集合
+                DataTypes.Clear();
+                foreach (var dtElement in dataTypeElement.Elements(ns + "DataType"))
+                {
+                    ParseDataType(dtElement);
+                }
+
+                //解析所有带Type节点的集合
+                DataTypeWithTypes.Clear();
+                foreach (var dtElement in dataTypeElement.Elements(ns + "DataType"))
+                {
+                    var type = dtElement.Element("Type");
+                    if (type!=null)
+                    {
+                        DataTypeWithTypes.Add((string)type);
+                    }
+                }
+            }
+            //解析变量集合
+            var varsElement = root.Descendants(ns + "Symbols").FirstOrDefault();
+            if (varsElement != null)
+            {
+                GlobalVariables.Clear();
+                foreach (var varElement in varsElement.Elements(ns + "Symbol"))
+                {
+                    ParseGlobalVariable(varElement);
+                }
+            }
+        }
+
+        private void ParseGlobalVariable(XElement element)
+        {
+            var variableName = (string)element.Element("Name");
+            var variableType = (string)element.Element("Type");
+            var variableSize = (int)element.Element("BitSize");
+
+            var arrayMatch = Regex.Match(variableType,@"Array\s*\[([^\]]+)\s*OF\s+([\w\.]+)", RegexOptions.IgnoreCase);
+            string typeWithoutPrefix = string.Empty;
+            if (arrayMatch.Success)
+            {
+                typeWithoutPrefix = ParseTypePrefix(arrayMatch.Groups[2].Value, variableType);
+            }
+            else
+            {
+                typeWithoutPrefix = ParseTypePrefix(variableType, variableType);
+            }
+
+            var variable = new PlcVariable
+            {
+                Name = variableName,
+                TypeName = typeWithoutPrefix,
+                Size = variableSize,
+                Comment = (string)element.Element("Comment")
+            };
+
+            var arrayInfo = ParseArrayType(variableType);
+            if (arrayInfo!=null)
+            {
+                variable.ArrayInfo = arrayInfo;
+                variable.TypeName = arrayInfo.ElementType;
+            }
+
+            variable.Attributes = ParseAttributes(element);
+            GlobalVariables.Add(variable);
+        }
+
+        public void ParseDataType(XElement element)
+        {
+            var typeName = (string)element.Element("Name");
+            var baseType = (string)element.Element("Type");
+
+            //数组类型
+            var arrayInfo = ParseArrayType(typeName);
+            if (arrayInfo!=null)
+            {
+                var arrayMatch = Regex.Match(typeName, @"Array\s*\[([^\]]+)\s*OF\s+([\w\.]+)", RegexOptions.IgnoreCase);
+                string typeWithoutPrefix = string.Empty;
+                if (arrayMatch.Success)
+                {
+                    typeWithoutPrefix = ParseTypePrefix(arrayMatch.Groups[2].Value, typeName);
+                }
+                else
+                {
+                    typeWithoutPrefix = ParseTypePrefix(typeName, typeName);
+                }
+
+                var plctype = new PlcType
+                {
+                    Name = typeWithoutPrefix,
+                    BaseType = arrayInfo.ElementType,                  
+                    Size = (int?)element.Element("BitSize")/8 ?? 0,
+                    Category = PlcTypeCategory.Array,
+                    ArrayInfo = arrayInfo
+                };
+                DataTypes[typeName]= plctype;
+                return;
+            }
+
+
+            //结构体类型
+            string nameWithoutPrefix = string.Empty;
+            string typeWithoutPrefix2 = string.Empty;
+            if (typeName != null)
+            {
+                nameWithoutPrefix = ParseTypePrefix(typeName, typeName);
+                if (baseType != null)
+                {
+                    typeWithoutPrefix2 = ParseTypePrefix(baseType, baseType);
+                }
+            }
+            else
+            {
+                return;
+            }
+            var plcTypeNormal = new PlcType
+            {
+                Name = nameWithoutPrefix,
+                BaseType = typeWithoutPrefix2,
+                Size =(int?)element.Element("BitSize")/8 ?? 0,
+                Category = DetermineTypeCategory(element, typeWithoutPrefix2)
+            };
+
+            var subItems = element.Elements(ns + "SubItem").ToList();
+            if (subItems.Any() && plcTypeNormal.Category == PlcTypeCategory.Struct)
+            {
+                plcTypeNormal.Members = new List<PlcTypeMember>();
+                foreach (var subItemElement in subItems)
+                {
+                    plcTypeNormal.Members.Add(ParseTypeMember(subItemElement));
+                }
+            }
+
+            DataTypes[nameWithoutPrefix]= plcTypeNormal;
+        }
+
+        private PlcTypeMember ParseTypeMember(XElement element)
+        {
+            var memberName = (string)element.Element("Name");
+            var memberType = (string)element.Element("Type");
+   
+            var arrayMatch = Regex.Match(memberType, @"Array\s*\[([^\]]+)\s*OF\s+([\w\.]+)", RegexOptions.IgnoreCase);
+            string typeWithoutPrefix = string.Empty;
+            if (arrayMatch.Success)
+            {
+                typeWithoutPrefix = ParseTypePrefix(arrayMatch.Groups[2].Value, memberType);
+            }
+            else
+            {
+                typeWithoutPrefix = ParseTypePrefix(memberType, memberType);
+            }
+
+            var member = new PlcTypeMember
+            {
+                Name = memberName,
+                TypeName = typeWithoutPrefix,
+                Offset = (int?)element.Element("BitOffs") ?? 0,
+                BitSize  = (int?)element.Element("BitSize")/8 ?? 0,
+               Comment = (string)element.Element("Comment")
+            };
+
+            var arrayInfo = ParseArrayType(memberType);
+            if (arrayInfo!=null)
+            {
+                member.ArrayInfo = arrayInfo;
+                member.TypeName = arrayInfo.ElementType;
+            }
+            member.Attributes = ParseStructAttributes(element);
+            return member;
+        }
+
+        private Dictionary<string, string> ParseAttributes(XElement element)
+        {
+            var attributes = new Dictionary<string, string>();
+            var attributesElement = element.Element("Name").Attribute("TcPersistent");
+            if (attributesElement != null)
+            {
+                var attrValue = (string)attributesElement.Value;
+                attributes["retain"] = attrValue;
+            }
+            return attributes;
+        }
+
+        private Dictionary<string, string> ParseStructAttributes(XElement element)
+        {
+            var attributes = new Dictionary<string, string>();
+            var attributesElement = element.Element("Properities")?.Element("Property");
+            if (attributesElement != null)
+            {
+                var attrValue = (string)attributesElement.Element("Name");
+                if (attrValue == "TcPersistent")
+                {
+                    attributes["retain"] = attrValue;
+                }
+                else { }
+            }
+            else { }
+            return attributes;
+        }
+
+        private PlcTypeCategory DetermineTypeCategory(XElement dataTypeElement, string baseType)
+        {
+            if (dataTypeElement.Elements(ns + "SubItem").Any()) return PlcTypeCategory.Struct;
+            if (!string.IsNullOrEmpty(baseType))
+            {
+                if (IsPrimitiveType(baseType)) return PlcTypeCategory.Primitive;
+                if (baseType.Equals("ENUM", StringComparison.OrdinalIgnoreCase)) return PlcTypeCategory.Enum;               
+            }
+            return PlcTypeCategory.Alias;
+        }
+
+        private bool IsPrimitiveType(string typeName)
+        {
+            var primitiveTypes = new[] { "BOOL","BYTE","WORD","DWORD","SINT","USINT","INT","UINT","UDINT","LINT","ULINT","REAL","LREAL","STRING","WSTRING"};
+            return primitiveTypes.Contains(typeName.ToUpper());
+        }
+
+        private ArrayInfo ParseArrayType(string typeDefinition)
+        {
+            if (string.IsNullOrEmpty(typeDefinition)) return null;
+            var arrayMatch = Regex.Match(typeDefinition, @"Array\s*\[([^\]]+)\s*OF\s+([\w\.]+)",RegexOptions.IgnoreCase);
+            
+            if (arrayMatch.Success)
+            {
+                var dimensionStr = arrayMatch.Groups[1].Value;
+                var elementType = arrayMatch.Groups[2].Value;
+                string typeWithoutPrefix = string.Empty;
+                if (elementType.Contains("."))
+                {
+                    string prefix = elementType.Split('.')[0].ToLower();
+                    if (libraryNames.Contains(prefix))
+                    {
+                        typeWithoutPrefix = Regex.Replace(elementType, prefix + ".", "", RegexOptions.IgnoreCase);
+                    }
+                    else
+                    {
+                        typeWithoutPrefix = elementType;
+                    }
+                }
+                else
+                {
+                    typeWithoutPrefix = elementType;
+                }
+
+                var dimensions = dimensionStr.Split(',');
+                var arrayInfo = new ArrayInfo
+                {
+                    Dimensions = dimensions.Length,
+                    LowerBounds = new int[dimensions.Length],
+                    UpperBounds = new int[dimensions.Length],
+                    Lengths = new int[dimensions.Length],
+                    ElementCount =0,
+                    ElementType = typeWithoutPrefix
+                };
+
+                for (int i = 0; i < dimensions.Length; i++)
+                {
+                    var rangeMatch = Regex.Match(dimensions[i].Trim(),@"(\d+)\.\.(\d+)");
+                    if (rangeMatch.Success)
+                    {
+                        arrayInfo.LowerBounds[i] = int.Parse(rangeMatch.Groups[1].Value);
+                        arrayInfo.UpperBounds[i] = int.Parse(rangeMatch.Groups[2].Value);
+                        arrayInfo.Lengths[i] = arrayInfo.UpperBounds[i] - arrayInfo.LowerBounds[i] + 1;
+                        arrayInfo.ElementCount += arrayInfo.Lengths[i];
+                    }
+                }
+                return arrayInfo;
+            }
+            return null;
+        }
+
+        private string ParseTypePrefix(string pattern, string type)
+        {
+            string nameWithoutPrefix = string.Empty;
+            if (pattern.Contains("."))
+            {
+                string prefix = pattern.Split('.')[0].ToLower();
+                if (libraryNames.Contains(prefix))
+                {
+                    nameWithoutPrefix = Regex.Replace(type, prefix + ".", "", RegexOptions.IgnoreCase);
+                }
+            }
+            else
+            {
+                nameWithoutPrefix = type;
+            }
+            return nameWithoutPrefix;
+        }
+
+        #endregion
+
+
+
+
+        #region 打印变量
+
+        public List<string> allVariableNames = new List<string>();
+        public void GetAllVariableNames()
+        {
+            allVariableNames.Clear();
+            foreach (var variable in GlobalVariables)
+            {
+                ParserVariableMethod(variable.Name);
+            }
+        }
+        private void ParserVariableMethod(string name)
+        {
+            var variable = GlobalVariables.FirstOrDefault(v => v.Name == name);
+
+            var parentVariable = new ParserVariable { Name = variable.Name,TypeName=variable.TypeName,Size=variable.Size,ArrayInfo = variable.ArrayInfo,IsRetain = variable.IsRetain};
+            ParseVariableStructure(parentVariable);
+        }
+        private void ParseVariableStructure(ParserVariable parentVariable, int[] currentIndices = null,int arrayDimension=0)
+        {
+            //数组
+            if (parentVariable.ArrayInfo!=null && arrayDimension<parentVariable.ArrayInfo.Dimensions)
+            {
+                for (int i = parentVariable.ArrayInfo.LowerBounds[arrayDimension]; i < parentVariable.ArrayInfo.UpperBounds[arrayDimension]; i++)
+                {
+                    var newIndices = currentIndices != null ? (int[])currentIndices.Clone() : new int[parentVariable.ArrayInfo.Dimensions];
+                    newIndices[arrayDimension] = i;
+                    string arrayPath = arrayDimension < parentVariable.ArrayInfo.Dimensions - 1 ? $"{parentVariable.Name}" : $"{parentVariable.Name}[{string.Join(",", newIndices.Take(arrayDimension + 1))}]";
+                    var parseVariable = new ParserVariable { Name = parentVariable.Name, TypeName = parentVariable.TypeName, Size = parentVariable.Size/parentVariable.ArrayInfo.ElementCount, ArrayInfo = parentVariable.ArrayInfo, IsRetain = parentVariable.IsRetain };
+                    ParseVariableStructure(parentVariable,newIndices,arrayDimension+1);
+                }
+                return;               
+            }
+
+            //
+
+            //基本数据
+            if (IsPrimitiveType(parentVariable.TypeName))
+            {
+                if (parentVariable.IsRetain)
+                {
+                    allVariableNames.Add($"{parentVariable.Name}|{parentVariable.TypeName}|{parentVariable.Size}");
+                }
+                return;
+            }
+
+            //是否为datatype类型
+            if (!DataTypes.TryGetValue(parentVariable.TypeName,out var dataType))
+            {
+                if (parentVariable.IsRetain)
+                {
+                    allVariableNames.Add($"{parentVariable.Name}|{parentVariable.TypeName}|{parentVariable.Size}");
+                }
+                return;
+            }
+
+            //结构体
+            if (dataType.IsStruct && dataType.Members != null)
+            {
+                bool typeIsRetain = parentVariable.IsRetain || dataType.IsRetain;
+                for (int i = 0; i < dataType.Members.Count; i++)
+                {
+                    var member = dataType.Members[i];
+                    var memberName = parentVariable.Name + "." + member.Name;
+                    bool memberIsRetain = typeIsRetain || member.IsRetain;
+                    //var isLast = i == dataType.Members.Count - 1;
+                    //var prefix = isLast ? "|__ " : "|-- ";
+                    if (member.IsArray)
+                    {
+                        var parseVariable = new ParserVariable { Name = memberName, TypeName = member.TypeName, Size = member.BitSize, ArrayInfo = member.ArrayInfo, IsRetain = memberIsRetain };
+                        ParseVariableStructure(parentVariable);
+                    }
+                    else {
+                        var parseVariable = new ParserVariable { Name = memberName, TypeName = member.TypeName, Size = member.BitSize, ArrayInfo = null, IsRetain = memberIsRetain };
+                        ParseVariableStructure(parentVariable);
+                    }
+                }
+            }
+            else
+            {
+                if (parentVariable.IsRetain)
+                {
+                    allVariableNames.Add($"{parentVariable.Name}|{parentVariable.TypeName}|{parentVariable.Size}");
+                }
+                return;
+            }
+        }
+
+        #endregion
+
+    }
+
+
+
+
+
+
+
+    public class PlcType
+    {
+        public string Name { get; set; }
+        public string BaseType { get; set; }
+        public int Size { get; set; }
+        public PlcTypeCategory Category { get; set; }
+        public List<PlcTypeMember> Members { get; set; }
+        public Dictionary<string,string> Attributes { get; set; }
+        public bool IsStruct => Category == PlcTypeCategory.Struct;
+        public bool IsArray => Category == PlcTypeCategory.Array;
+        public ArrayInfo ArrayInfo { get; set; }
+        public bool IsRetain => Attributes != null &&
+                            (Attributes.ContainsKey("retain")|| 
+                            Attributes.ContainsKey("qualified_only"));
+    }
+
+    public class PlcTypeMember
+    {
+        public string Name { get; set; }
+        public string TypeName { get; set; }
+        public int BitSize { get; set; }
+        public int Offset { get; set; }
+        public ArrayInfo ArrayInfo { get; set; }
+        public string Comment { get; set; }
+        public Dictionary<string, string> Attributes { get; set; }
+        public bool IsArray => ArrayInfo != null;
+        public bool IsRetain => Attributes != null &&
+                            (Attributes.ContainsKey("retain") ||
+                            Attributes.ContainsKey("qualified_only"));
+    }
+
+    public enum PlcTypeCategory
+    {
+        Primitive,
+        Struct,
+        Enum,
+        Array,
+        Pointer,
+        Reference,
+        Alias
+    }
+
+    public class PlcVariable
+    {
+        public string Name { get; set; }
+        public string TypeName { get; set; }
+        public int Size { get; set; }
+        public string Comment { get; set; }
+        public ArrayInfo ArrayInfo { get; set; }
+        public Dictionary<string,string> Attributes { get; set; }
+        public bool IsArray => ArrayInfo != null;
+        public bool IsRetain => Attributes != null &&
+                            (Attributes.ContainsKey("retain") ||
+                            Attributes.ContainsKey("qualified_only"));
+    }
+
+    public class ArrayInfo
+    {
+        public int Dimensions { get; set; }
+        public int[] LowerBounds { get; set; }
+        public int[] UpperBounds { get; set; }
+        public int[] Lengths { get; set; }
+        public int ElementCount { get; set; }
+        public string ElementType { get; set; }
+    }
+
+    public class ParserVariable
+    {
+        public string Name { get; set; }
+        public string TypeName { get; set; }
+        public int Size { get; set; }
+        public bool IsRetain { get; set; }
+        public ArrayInfo ArrayInfo { get; set; }
+    }
+
+    public class Variable
+    {
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public int Size { get; set; }
+        public bool IsRetain { get; set; }
+    }
+
+}
