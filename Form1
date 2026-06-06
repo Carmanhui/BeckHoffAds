@@ -1,0 +1,48 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using AdsHelper;
+
+namespace BeckHoffAds
+{
+    public partial class Form1 : Form
+    {
+        ADSHelper plc = new ADSHelper();
+
+        bool IsConnected = false;
+        public Form1()
+        {
+            InitializeComponent();
+        }
+
+        private void btnConnect_Click(object sender, EventArgs e)
+        {
+            IsConnected = plc.CreateADSConnect("127.0.0.1.1.1", 851);
+
+            //if (IsConnected)
+            //{
+            //    plc.ReadSymbol("GVL.arstTest");
+
+            //    var ffff = plc.symbolValues;
+
+
+            //    plc.Save("./1.txt");
+
+            //    var gg = plc.symbolValues;
+
+            //    bool fff = false;
+            //}
+        }
+
+        private void btnToPlc_Click(object sender, EventArgs e)
+        {
+            plc.ToPlc("./1.txt");
+        }
+    }
+}
