@@ -1,0 +1,109 @@
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AdsHelper
+{
+    public static class JsonHelper
+    {
+        private static readonly JsonSerializerSettings _settings = new JsonSerializerSettings
+        {
+            NullValueHandling = NullValueHandling.Ignore,
+            DateFormatString = "yyyy-MM-dd HH:mm:ss",
+            Formatting = Formatting.None
+        };
+
+        /// <summary>
+        /// 序列化对象为JSON字符串
+        /// </summary>
+        public static string Serialize(object obj, bool indented = false)
+        {
+            if (obj == null) return string.Empty;
+
+            var settings = new JsonSerializerSettings
+            {
+                NullValueHandling = _settings.NullValueHandling,
+                DateFormatString = _settings.DateFormatString,
+                Formatting = indented ? Formatting.Indented : Formatting.None
+            };
+
+            return JsonConvert.SerializeObject(obj, settings);
+        }
+
+        /// <summary>
+        /// 反序列化JSON字符串为对象
+        /// </summary>
+        public static T Deserialize<T>(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return default(T);
+
+            try
+            {
+                return JsonConvert.DeserializeObject<T>(json, _settings);
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException($"JSON反序列化失败: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// 反序列化JSON字符串为动态对象
+        /// </summary>
+        public static dynamic DeserializeDynamic(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            return JsonConvert.DeserializeObject<dynamic>(json);
+        }
+
+        /// <summary>
+        /// 格式化JSON字符串
+        /// </summary>
+        public static string FormatJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return string.Empty;
+
+            try
+            {
+                var obj = JsonConvert.DeserializeObject(json);
+                return JsonConvert.SerializeObject(obj, Formatting.Indented);
+            }
+            catch
+            {
+                return json;
+            }
+        }
+
+        /// <summary>
+        /// 验证JSON字符串是否有效
+        /// </summary>
+        public static bool IsValidJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return false;
+
+            try
+            {
+                JToken.Parse(json);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 深度克隆对象
+        /// </summary>
+        public static T DeepClone<T>(T obj)
+        {
+            if (obj == null) return default(T);
+            var json = Serialize(obj);
+            return Deserialize<T>(json);
+        }
+    }
+}
