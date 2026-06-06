@@ -1,0 +1,622 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using TwinCAT.Ads.TypeSystem;
+using TwinCAT.Ads.ValueAccess;
+using TwinCAT.Ads;
+using TwinCAT.TypeSystem;
+using TwinCAT;
+
+namespace AdsHelper
+{
+    public class PlcConnection : INotifyPropertyChanged
+    {
+        #region 字段
+        // 符号加载设置
+        //private readonly SymbolLoaderSettings _symbolLoaderSettings = new SymbolLoaderSettings(SymbolsLoadMode.VirtualTree, ValueAccessMode.IndexGroupOffsetPreferred);
+        private ISymbolLoader _symbolLoader;
+        #endregion
+
+        #region 属性
+        public AmsAddress Address { get; private set; }
+        public AdsSession Session { get; private set; }
+        public AdsConnection Connection { get; private set; } // ADS连接
+        public List<ISymbol> SymbolList { get; } = new List<ISymbol>();// 符号（变量）列表
+
+        private bool _connected;
+        /// <summary>
+        /// 连接成功
+        /// </summary>
+        public bool Connected
+        {
+            get { return _connected; }
+            private set
+            {
+                _connected = value;
+                OnPropertyChanged("Connected");
+            }
+        }
+        #endregion
+
+        #region 事件
+
+        public event PlcConnectionErrorEventHandler PlcConnectionError;
+
+        #endregion
+
+        /// <summary>
+        /// PLC连接类
+        /// </summary>
+        /// <param name="address">PLC AMS address</param>
+        public PlcConnection(AmsAddress address)
+        {
+            Address = address;
+        }
+
+        #region 连接PLC
+        /// <summary>
+        /// 连接到PLC
+        /// </summary>
+        public void Connect()
+        {
+            // 如果已连接，请先断开连接
+            if (Session != null && Connection.ConnectionState == ConnectionState.Connected)
+            {
+                Disconnect();
+            }
+
+            try
+            {
+                Session?.Dispose(); // 释放对象AdsSession的对象
+                // 创建AdsSession类型的对象
+                Session = new AdsSession(Address, SessionSettings.Default);
+                Connection = (AdsConnection)Session.Connect();
+
+                // _symbolLoader = SymbolLoaderFactory.Create(Connection, _symbolLoaderSettings);
+                _symbolLoader = SymbolLoaderFactory.Create(Connection, new SymbolLoaderSettings(SymbolsLoadMode.VirtualTree, ValueAccessMode.IndexGroupOffsetPreferred));
+                // 根据状态判断是否连接成功
+                AdsState state = Connection.ReadState().AdsState;
+                if (state == AdsState.Run || state == AdsState.Stop)
+                {
+                    Connected = true;
+                    GetSymbols();
+                }
+                else
+                {
+                    Disconnect();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                string port = Session == null ? string.Empty : $"Port {Session.Port}: ";
+                OnPlcConnectionError(new PlcConnectionErrorEventArgs($"{port}{ex.Message}"));
+                Disconnect();
+            }
+        }
+        #endregion
+
+        #region 断开连接
+        /// <summary>
+        /// 用于断开与PLC连接的包装
+        /// </summary>
+        public void Disconnect()
+        {
+            Connected = false;
+            Connection.Disconnect();
+        }
+        #endregion
+
+        /// <summary>
+        /// 从PLC获取符号（变量）
+        /// </summary>
+        private void GetSymbols()
+        {
+            SymbolList.Clear();
+            foreach (ISymbol symbol in _symbolLoader.Symbols)
+            {
+                // 添加TC3变量到Symbols变量列表--->递归查询
+                AddSymbolRecursive(SymbolList, symbol);
+            }
+        }
+        #region 递归读取PLC变量符号
+        public static void AddSymbolRecursive(List<ISymbol> symbols, ISymbol symbol, bool debug = false)
+        {
+            try
+            {
+                // 筛选变量
+                if (symbol.DataType == null && symbol.Category != DataTypeCategory.Struct)
+                    return;
+                if (symbol.DataType != null && symbol.DataType.Name.StartsWith("TC2_MC2."))
+                    return;
+                if (symbol.DataType != null && symbol.Category == DataTypeCategory.FunctionBlock)
+                    return;
+                if (symbol.TypeName != null && symbol.TypeName == "TC2_MC2.MC_Power")
+                    Console.WriteLine();
+                foreach (ITypeAttribute attribute in symbol.Attributes)
+                {
+                    if (debug)
+                        Debug.WriteLine($"{attribute.Name} : {attribute.Value}");
+                }
+
+                if (debug)
+                    Debug.WriteLine(
+                    $"{symbol.InstancePath} : {symbol.TypeName} (IG: 0x{((IAdsSymbol)symbol).IndexGroup:x} IO: 0x{((IAdsSymbol)symbol).IndexOffset:x} size: {symbol.Size})");
+
+                switch (symbol.Category)
+                {
+                    case DataTypeCategory.Array:
+                        IArrayInstance arrInstance = (IArrayInstance)symbol;
+                        //IArrayType arrType = (IArrayType)symbol.DataType;
+                        // 将数组里的每个元素递归添加到变量元素集合
+                        if (arrInstance.Elements != null)
+                        {
+                            foreach (ISymbol arrayElement in arrInstance.Elements)
+                            {
+                                AddSymbolRecursive(symbols, arrayElement);
+                            }
+                        }
+                        else Debug.WriteLine($"Array elements of {arrInstance.TypeName} are null");
+
+                        break;
+                    case DataTypeCategory.Struct:
+                        IStructInstance structInstance = (IStructInstance)symbol;
+                        //IStructType structType = (IStructType)symbol.DataType;
+                        try
+                        {
+                            foreach (ISymbol member in structInstance.MemberInstances)
+                            {
+                                AddSymbolRecursive(symbols, member);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine(ex.Message);
+                        }
+
+                        break;
+                    case DataTypeCategory.Interface:
+                        // 无法读取“Interface”，请将其过滤掉。
+                        break;
+                    case DataTypeCategory.Alias:
+                        // 无法读取“Alias”，请将其过滤掉。
+                        IAliasInstance aliasInstance = (IAliasInstance)symbol;
+                        symbols.Add(aliasInstance);// 符合条件添加到列表
+                        break;
+                    default:
+                        symbols.Add(symbol);// 符合条件添加到列表
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+                throw;
+            }
+        }
+
+        public static string GetSymbolValue(ISymbol symbol, TcAdsClient plcClient)
+        {
+            if (plcClient == null || plcClient.ConnectionState != ConnectionState.Connected) return "未连接";
+            string data = "";
+            try
+            {
+                TimeSpan t;
+                DateTime dt;
+                switch (symbol.TypeName)
+                {
+                    case "BOOL":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(bool)).ToString();
+                        break;
+                    case "BYTE":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "SINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(sbyte)).ToString();
+                        break;
+                    case "INT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(short)).ToString();
+                        break;
+                    case "DINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(int)).ToString();
+                        break;
+                    case "LINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(long)).ToString();
+                        break;
+                    case "USINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "UINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "UDINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "ULINT":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ulong)).ToString();
+                        break;
+                    case "REAL":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(float)).ToString();
+                        break;
+                    case "LREAL":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(double)).ToString();
+                        break;
+                    case "WORD":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "DWORD":
+                        data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "TIME":
+                        t = TimeSpan.FromMilliseconds((uint)plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        if (t.Minutes > 0) data = $"T#{t.Minutes}m{t.Seconds}s{t.Milliseconds}ms";
+                        else if (t.Seconds > 0) data = $"T#{t.Seconds}s{t.Milliseconds}ms";
+                        else data = $"T#{t.Milliseconds}ms";
+                        break;
+                    case "TIME_OF_DAY":
+                    case "TOD":
+                        t = TimeSpan.FromMilliseconds((uint)plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        if (t.Hours > 0) data = $"TOD#{t.Hours}:{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else if (t.Minutes > 0) data = $"TOD#{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else data = $"TOD#{t.Seconds}.{t.Milliseconds}";
+                        break;
+                    case "DATE":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        data = $"D#{dt.Year}-{dt.Month}-{dt.Day}";
+                        break;
+                    case "DATE_AND_TIME":
+                    case "DT":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        data = $"DT#{dt.Year}-{dt.Month}-{dt.Day}-{dt.Hour}:{dt.Minute}:{dt.Second}";
+                        break;
+                    default:
+                        if (symbol.TypeName.StartsWith("STRING"))
+                        {
+                            int charCount = Convert.ToInt32(symbol.TypeName.Replace("STRING(", "").Replace(")", ""));
+                            data = plcClient.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(string), new[] { charCount }).ToString();
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+
+            return data;
+        }
+
+        public static string GetSymbolValue(ISymbol symbol, AdsConnection connection)
+        {
+            if (connection == null || connection.ConnectionState != ConnectionState.Connected) return "未连接";
+            string data = "";
+            try
+            {
+                TimeSpan t;
+                DateTime dt;
+                switch (symbol.TypeName)
+                {
+                    case "BOOL":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(bool)).ToString();
+                        break;
+                    case "BYTE":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "SINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(sbyte)).ToString();
+                        break;
+                    case "INT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(short)).ToString();
+                        break;
+                    case "DINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(int)).ToString();
+                        break;
+                    case "LINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(long)).ToString();
+                        break;
+                    case "USINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "UINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "UDINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "ULINT":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ulong)).ToString();
+                        break;
+                    case "REAL":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(float)).ToString();
+                        break;
+                    case "LREAL":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(double)).ToString();
+                        break;
+                    case "WORD":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "DWORD":
+                        data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "TIME":
+                        t = TimeSpan.FromMilliseconds((uint)connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        if (t.Minutes > 0) data = $"T#{t.Minutes}m{t.Seconds}s{t.Milliseconds}ms";
+                        else if (t.Seconds > 0) data = $"T#{t.Seconds}s{t.Milliseconds}ms";
+                        else data = $"T#{t.Milliseconds}ms";
+                        break;
+                    case "TIME_OF_DAY":
+                    case "TOD":
+                        t = TimeSpan.FromMilliseconds((uint)connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        if (t.Hours > 0) data = $"TOD#{t.Hours}:{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else if (t.Minutes > 0) data = $"TOD#{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else data = $"TOD#{t.Seconds}.{t.Milliseconds}";
+                        break;
+                    case "DATE":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        data = $"D#{dt.Year}-{dt.Month}-{dt.Day}";
+                        break;
+                    case "DATE_AND_TIME":
+                    case "DT":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(uint)));
+                        data = $"DT#{dt.Year}-{dt.Month}-{dt.Day}-{dt.Hour}:{dt.Minute}:{dt.Second}";
+                        break;
+                    default:
+                        if (symbol.TypeName.StartsWith("STRING"))
+                        {
+                            int charCount = Convert.ToInt32(symbol.TypeName.Replace("STRING(", "").Replace(")", ""));
+                            data = connection.ReadAny(((IAdsSymbol)symbol).IndexGroup, ((IAdsSymbol)symbol).IndexOffset, typeof(string), new[] { charCount }).ToString();
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+
+            return data;
+        }
+
+        public static string GetSymbolValue(SymbolInfoModel symbol, TcAdsClient plcClient)
+        {
+            if (plcClient == null || plcClient.ConnectionState != ConnectionState.Connected) return "未连接";
+            string data = "";
+            try
+            {
+                TimeSpan t;
+                DateTime dt;
+                switch (symbol.Type)
+                {
+                    case "BOOL":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(bool)).ToString();
+                        break;
+                    case "BYTE":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "SINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(sbyte)).ToString();
+                        break;
+                    case "INT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(short)).ToString();
+                        break;
+                    case "DINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(int)).ToString();
+                        break;
+                    case "LINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(long)).ToString();
+                        break;
+                    case "USINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "UINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "UDINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "ULINT":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(ulong)).ToString();
+                        break;
+                    case "REAL":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(float)).ToString();
+                        break;
+                    case "LREAL":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(double)).ToString();
+                        break;
+                    case "WORD":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "DWORD":
+                        data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "TIME":
+                        t = TimeSpan.FromMilliseconds((uint)plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)));
+                        if (t.Minutes > 0) data = $"T#{t.Minutes}m{t.Seconds}s{t.Milliseconds}ms";
+                        else if (t.Seconds > 0) data = $"T#{t.Seconds}s{t.Milliseconds}ms";
+                        else data = $"T#{t.Milliseconds}ms";
+                        break;
+                    case "TIME_OF_DAY":
+                    case "TOD":
+                        t = TimeSpan.FromMilliseconds((uint)plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)));
+                        if (t.Hours > 0) data = $"TOD#{t.Hours}:{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else if (t.Minutes > 0) data = $"TOD#{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else data = $"TOD#{t.Seconds}.{t.Milliseconds}";
+                        break;
+                    case "DATE":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)));
+                        data = $"D#{dt.Year}-{dt.Month}-{dt.Day}";
+                        break;
+                    case "DATE_AND_TIME":
+                    case "DT":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(uint)));
+                        data = $"DT#{dt.Year}-{dt.Month}-{dt.Day}-{dt.Hour}:{dt.Minute}:{dt.Second}";
+                        break;
+                    default:
+                        if (symbol.Type.StartsWith("STRING"))
+                        {
+                            int charCount = Convert.ToInt32(symbol.Type.Replace("STRING(", "").Replace(")", ""));
+                            data = plcClient.ReadAny(symbol.IndexGroup, symbol.IndexOffset, typeof(string), new[] { charCount }).ToString();
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+
+            return data;
+        }
+
+        public static string GetSymbolValue(SymbolInfoModel symbol, AdsConnection connection)
+        {
+            if (connection == null || connection.ConnectionState != ConnectionState.Connected) return "未连接";
+            string data;
+            try
+            {
+                TimeSpan t;
+                DateTime dt;
+                switch (symbol.Type)
+                {
+                    case "BIT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(bool)).ToString();
+                        break;
+                    case "BOOL":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(bool)).ToString();
+                        break;
+                    case "BYTE":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "SINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(sbyte)).ToString();
+                        break;
+                    case "INT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(short)).ToString();
+                        break;
+                    case "DINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(int)).ToString();
+                        break;
+                    case "LINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(long)).ToString();
+                        break;
+                    case "USINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(byte)).ToString();
+                        break;
+                    case "UINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "UDINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "ULINT":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(ulong)).ToString();
+                        break;
+                    case "REAL":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(float)).ToString();
+                        break;
+                    case "LREAL":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(double)).ToString();
+                        break;
+                    case "WORD":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(ushort)).ToString();
+                        break;
+                    case "DWORD":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)).ToString();
+                        break;
+                    case "ENUM":
+                        data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(IEnumValue)).ToString();
+                        //data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(Enum)).ToString();
+                        break;
+                    case "TIME":
+                        t = TimeSpan.FromMilliseconds((uint)connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)));
+                        if (t.Minutes > 0) data = $"T#{t.Minutes}m{t.Seconds}s{t.Milliseconds}ms";
+                        else if (t.Seconds > 0) data = $"T#{t.Seconds}s{t.Milliseconds}ms";
+                        else data = $"T#{t.Milliseconds}ms";
+                        break;
+                    case "TIME_OF_DAY":
+                    case "TOD":
+                        t = TimeSpan.FromMilliseconds((uint)connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)));
+                        if (t.Hours > 0) data = $"TOD#{t.Hours}:{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else if (t.Minutes > 0) data = $"TOD#{t.Minutes}:{t.Seconds}.{t.Milliseconds}";
+                        else data = $"TOD#{t.Seconds}.{t.Milliseconds}";
+                        break;
+                    case "DATE":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)));
+                        data = $"D#{dt.Year}-{dt.Month}-{dt.Day}";
+                        break;
+                    case "DATE_AND_TIME":
+                    case "DT":
+                        dt = new DateTime(1970, 1, 1);
+                        dt = dt.AddSeconds((uint)connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(uint)));
+                        data = $"DT#{dt.Year}-{dt.Month}-{dt.Day}-{dt.Hour}:{dt.Minute}:{dt.Second}";
+                        break;
+                    default:
+                        if (symbol.Type.StartsWith("STRING"))
+                        {
+                            int charCount = Convert.ToInt32(symbol.Type.Replace("STRING(", "").Replace(")", ""));
+                            data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(string), new[] { charCount }).ToString();
+                            if (data.Length == 0) data = $"\"\"";
+                        }
+                        else if (symbol.Type.StartsWith("POINTER") || symbol.Type.StartsWith("REFERENCE"))
+                        {
+                            UInt64 int64Data = Convert.ToUInt64(connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(UInt64)));
+                            data = "16#" + int64Data.ToString("X");
+                        }
+                        else
+                        {
+                            data = connection.ReadAny((uint)symbol.IndexGroup, (uint)symbol.IndexOffset, typeof(string), new[] { symbol.Size }).ToString();
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+            return data;
+
+        }
+        #endregion
+        protected virtual void OnPlcConnectionError(PlcConnectionErrorEventArgs e)
+        {
+            PlcConnectionError?.Invoke(this, e);
+        }
+
+        #region INotifyPropertyChanged 接口实现
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        protected virtual void OnPropertyChanged(string propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        #endregion
+
+    }
+
+    public delegate void PlcConnectionErrorEventHandler(object sender, PlcConnectionErrorEventArgs e);
+
+    public class PlcConnectionErrorEventArgs : EventArgs
+    {
+        public PlcConnectionErrorEventArgs(string message)
+        {
+            Message = message;
+        }
+
+        public string Message { get; }
+    }
+
+}
+
