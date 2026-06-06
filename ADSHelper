@@ -1,0 +1,1163 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using TwinCAT.Ads;
+using TwinCAT.Ads.SumCommand;
+using TwinCAT.TypeSystem;
+using TwinCAT.Ads.TypeSystem;
+using Newtonsoft.Json.Linq;
+using System.Text.RegularExpressions;
+using System.Collections;
+using System.Threading.Tasks;
+using System.IO;
+using TwinCAT;
+using System.Timers;
+
+namespace AdsHelper
+{
+    public class ADSHelper : IDisposable
+    {
+        #region 属性字段声明
+        public TcAdsClient tcClient;
+        public ReadOnlySymbolCollection allSymbols;
+        public Dictionary<string, DataType> allDataTypes;
+        //public List<ISymbol> ISymbols = new List<ISymbol>();
+        private List<ISymbol> _symbols = new List<ISymbol>();
+        public List<ISymbol> PersistantSymbols = new List<ISymbol>();
+        public List<string> PersistantVars = new List<string>();     
+        public List<string> symbolValues = new List<string>();
+        public string PlcIP { get; private set; }
+        public int PlcPort { get; private set; }
+
+       
+
+        //ADSHelper初始化读取标记
+        private bool needGetAllDefaults = true;
+
+        private bool IsConnected = false;
+
+        private int[] hd=new int[100];
+        public bool plcToXmlStart;
+        public bool xmlToPlcStart;
+        public bool bootCopyStart;
+        public List<bool> triggerVariables = new List<bool>();
+        private Timer timer;
+
+        #endregion
+
+        #region ADS初始化
+        /// <summary>
+        /// PLC是否已连接运行
+        /// </summary>
+        /// <returns></returns>
+        public bool IsADSConnected()
+        {
+            try
+            {
+                if (tcClient == null)
+                {
+                    CreateADSConnect(PlcIP, PlcPort);
+                }
+
+                if (tcClient.ReadState().AdsState == AdsState.Run || tcClient.ReadState().AdsState == AdsState.Init || tcClient.ReadState().AdsState == AdsState.Start)
+                {
+                    GetAllDefaults();
+                    return true;
+                }
+                else
+                {
+                    if (!needGetAllDefaults)
+                        needGetAllDefaults = true;
+                    return false;
+                }
+            }
+            catch
+            {
+                if (!needGetAllDefaults)
+                    needGetAllDefaults = true;
+                return false;
+            }
+        }
+        /// <summary>
+        /// 获取PLC allSymbols
+        /// </summary>
+        private void GetAllDefaults()
+        {
+            if (needGetAllDefaults || allSymbols == null || allSymbols.Count == 0 || allDataTypes == null || allDataTypes.Count == 0)
+            {
+                //ADS Client Load symbolic and DataType information 初始化
+                ISymbolLoader loader = SymbolLoaderFactory.Create(tcClient, SymbolLoaderSettings.Default);
+                allSymbols = loader.Symbols;
+                allDataTypes = loader.DataTypes.ToDictionary(i => i.Name, i => (DataType)i);
+                if (allSymbols.Count > 0 && allDataTypes.Count > 0)
+                    needGetAllDefaults = false;
+            }
+        }
+        /// <summary>
+        /// 获取断电保持变量，如果结构体是保持型，直接获取结构体名
+        /// </summary>
+        public void GetAllPersistantSymbols()
+        {
+            PersistantSymbols.Clear();
+            foreach (var symbol in allSymbols)
+            {
+                ParseAllSymbols(symbol);
+            }
+        }
+        /// <summary>
+        /// 循环方法
+        /// </summary>
+        /// <param name="symbol"></param>
+        private void ParseAllSymbols(ISymbol symbol)
+        {
+            if (!symbol.InstancePath.StartsWith(".."))
+            {  
+                if (symbol.IsPersistent)
+                {
+                    PersistantSymbols.Add(symbol);
+                }             
+                else if (symbol.SubSymbols.Count<ISymbol>() > 0)
+                {
+                    foreach (ISymbol subSymbol in symbol.SubSymbols)
+                    {
+                        ParseAllSymbols(subSymbol);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 建立ADS Client连接
+        /// </summary>
+        public bool CreateADSConnect(string plcIP, int plcPort)
+        {
+            //ADS Client初始化
+            tcClient = new TcAdsClient();
+            tcClient.Connect(plcIP, plcPort);
+            PlcIP = plcIP;
+            PlcPort = plcPort;
+            IsConnected = true;
+            return IsADSConnected();
+        }
+        #endregion
+
+        #region 在线获取变量
+
+        /// <summary>
+        /// 解析保持型变量
+        /// </summary>
+        /// <param name="IsStructVar">结构形式</param>
+        /// <param name="IsBaseArray">数组整体</param>
+        public void ParsePlcSymbols(bool IsStructVar=false,bool IsBaseArray=false)
+        {
+            try
+            {
+                PersistantSymbols.Clear();
+                PersistantVars.Clear();
+                var symbols = SymbolLoaderFactory.Create(tcClient, SymbolLoaderSettings.Default).Symbols;
+                foreach (var symbol in symbols)
+                {
+                    AddPlcSymbols(symbol,IsStructVar,IsBaseArray);
+                }
+            }
+            catch (Exception ex)
+            {
+                
+            }
+        }
+        /// <summary>
+        /// 循环方法
+        /// </summary>
+        /// <param name="symbol"></param>
+        /// <param name="IsStructVar"></param>
+        /// <param name="IsBaseArray"></param>
+        public void AddPlcSymbols(ISymbol symbol,bool IsStructVar=false,bool IsBaseArray=false)
+        {
+            if (IsStructVar)
+            {
+                if (!symbol.InstancePath.StartsWith(".."))
+                {
+                    if (symbol.IsPersistent)
+                    {
+                        PersistantSymbols.Add(symbol);
+                        PersistantVars.Add($"{symbol.InstancePath}|{symbol.DataType.Name}|{symbol.Size}");
+                    }
+                    else if (symbol.SubSymbols.Count<ISymbol>() > 0)
+                    {
+                        foreach (var item in symbol.SubSymbols)
+                        {
+                            AddPlcSymbols(item, IsStructVar,IsBaseArray);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (symbol.SubSymbols.Count<ISymbol>() > 0)
+                {
+                    if (IsBaseArray)
+                    {
+                        if (symbol.DataType is IArrayType array)
+                        {
+                            if (symbol.SubSymbols[0].Category == DataTypeCategory.String || symbol.SubSymbols[0].Category == DataTypeCategory.Primitive)
+                            {
+                                if (symbol.IsPersistent)
+                                {
+                                    PersistantSymbols.Add(symbol);
+                                    PersistantVars.Add($"{symbol.InstancePath}|{symbol.DataType.Name}|{symbol.Size}");
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    foreach (var item in symbol.SubSymbols)
+                    {
+                        AddPlcSymbols(item,IsStructVar,IsBaseArray);
+                    }
+                }
+                else
+                {
+                    if (!symbol.InstancePath.StartsWith(".."))
+                    {
+                        if (symbol.IsPersistent)
+                        {
+                            PersistantSymbols.Add(symbol);
+                            PersistantVars.Add($"{symbol.InstancePath}|{symbol.DataType.Name}|{symbol.Size}");
+                        }
+                    }
+                }
+            }
+            
+        }
+
+        #endregion
+
+        #region ADSReadAndWrite
+
+        /// <summary>
+        /// 读取所有断电保持型变量
+        /// </summary>
+        public int FromPlc(string path)
+        {
+            int num = 0;
+            symbolValues.Clear();
+            ParsePlcSymbols(true,false);
+
+            object[] values = null;
+            AdsErrorCode[] adsErrorCodes=null;
+            new SumSymbolRead(tcClient, PersistantSymbols).TryRead(out values,out adsErrorCodes);
+            
+            for (int i = 0; i < values.Length; i++)
+            {
+                //字节数组：包括结构体，字节数组
+                if (typeof(byte[]) == values[i].GetType())
+                {
+                    ParsePlcDataToString((byte[])values[i], PersistantSymbols[i]);
+                }
+                else
+                {
+                    DataType dataType = (DataType)PersistantSymbols[i].DataType;
+                    //数组
+                    if (dataType.Category == DataTypeCategory.Array)
+                    {
+                        List<string> temp = new List<string>();
+                        if (values[i] is Array array)
+                        {
+                            foreach (var item in array)
+                            {
+                                temp.Add(item.ToString());
+                            }
+                            ParsePlcDataToArrayString(temp.ToArray(), PersistantSymbols[i]);
+                        }
+                    }
+                    //
+                    else
+                    {
+                        symbolValues.Add($"{PersistantSymbols[i].InstancePath}|{values[i].ToString()}");
+                    }
+                }
+            }
+            num = values.Count();
+            if (!string.IsNullOrEmpty(path))
+            {
+                File.WriteAllLines(path, symbolValues);
+            }
+            return num;
+            
+        }
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        public int ToPlc(string path)
+        {
+            if (File.Exists(path))
+            {
+                Dictionary<string, object> keyValuePairs = new Dictionary<string, object>();
+                var lines = File.ReadAllLines(path);
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string[] splits = lines[i].Split('|');
+                    string name = splits[0];
+                    string value = splits[1];
+                    var symbol = allSymbols[name];
+                    if (symbol != null)
+                    {
+                        keyValuePairs.Add(name, ValueToObject(symbol, value));
+                    }
+                }
+                return SumWrite(keyValuePairs);  
+            }
+            return 0;
+            
+        }
+        public int SumWrite(Dictionary<string, object> keyValuePairs)
+        {
+            int num = 0;
+            List<string> Symbols = keyValuePairs.Keys.ToList();
+            object[] Values = keyValuePairs.Values.ToArray();
+            SumSymbolWrite writeCommand = new SumSymbolWrite(tcClient, GetSymbol(Symbols));
+            writeCommand.Write(Values);
+            if (writeCommand.Succeeded)
+            {
+                num = Values.Count();
+            }
+            return num;
+        }
+
+
+        /// <summary>
+        /// 读取单个变量：结构体，数组，基本类型
+        /// </summary>
+        /// <param name="InstancePath"></param>
+        public void ReadSingleSymbol(string InstancePath)
+        {
+            symbolValues.Clear();
+
+            //SymbolCollection symbol = new SymbolCollection() {allSymbols[InstancePath] };
+            SymbolCollection symbol = GetSymbol(InstancePath);
+            SumSymbolRead readCommand = new SumSymbolRead(tcClient, symbol);
+            object value = readCommand.Read()[0];
+            if (typeof(byte[]) == value.GetType())
+            {
+                ParsePlcDataToString((byte[])value, symbol[0]);
+            }
+            else
+            {
+                DataType dataType = (DataType)symbol[0].DataType;
+                if (dataType.Category == DataTypeCategory.Array)
+                {
+                    List<string> temp = new List<string>();
+                    if (value is Array array)
+                    {
+                        foreach (var item in array)
+                        {
+                            temp.Add(item.ToString());
+                        }
+                        ParsePlcDataToArrayString(temp.ToArray(), symbol[0]);
+                    }
+                }
+                else
+                {
+                    symbolValues.Add($"{symbol[0].InstancePath}:={value.ToString()}");
+                }
+            }
+        }
+
+        public string ReadSingleSymbolStr(string InstancePath)
+        {
+            SymbolCollection symbol = GetSymbol(InstancePath);
+            SumSymbolRead readCommand = new SumSymbolRead(tcClient, symbol);
+            object value = readCommand.Read()[0];
+            return value.ToString();            
+        }
+
+        /// <summary>
+        /// 读取任何类型
+        /// </summary>
+        /// <param name="InstancePath"></param>
+        public void ReadSymbol(string InstancePath)
+        {
+            symbolValues.Clear();
+            ISymbol symbol = allSymbols[InstancePath];
+            SumSymbolRead readCommand = new SumSymbolRead(tcClient,new List<ISymbol> { symbol});
+            object value= readCommand.Read()[0];
+            if (typeof(byte[]) == value.GetType())
+            {
+                ParsePlcDataToString((byte[])value, symbol);
+            }
+            else
+            {
+                DataType dataType = (DataType)symbol.DataType;
+                if (dataType.Category == DataTypeCategory.Array)
+                {
+                    ArrayType arrayType = (ArrayType)dataType;
+                    List<string> result = new List<string>();
+                    if (value is Array array)
+                    {
+                        foreach (var item in array)
+                        {
+                            result.Add(item.ToString());
+                        }
+                    }
+                    ParsePlcDataToArrayString(result.ToArray(), symbol);
+                }
+                else
+                {
+                    symbolValues.Add($"{symbol.InstancePath}|{value.ToString()}");
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// 写入
+        /// </summary>
+        /// <param name="InstancePath"></param>
+        /// <param name="value"></param>
+        public void WriteSingleSymbol(string InstancePath,string value)
+        {
+            try
+            {
+                ISymbol symbol = allSymbols[InstancePath];
+                object[] values = new object[] { ValueToObject(symbol,value)};
+                SumSymbolWrite writeCommand = new SumSymbolWrite(tcClient,new List<ISymbol> { symbol});
+                writeCommand.Write(values);
+            }
+            catch (Exception ex)
+            {
+                string debug = ex.Message;
+            }
+        }
+    
+        private SymbolCollection GetSymbol(List<string> Symbols)
+        {
+            SymbolCollection symbolCollection = new SymbolCollection();
+
+            foreach (string symbol in Symbols)
+            {
+                symbolCollection.Add(allSymbols[symbol]);
+            }
+
+            return symbolCollection;
+        }
+        private SymbolCollection GetSymbol(string Symbols)
+        {
+            SymbolCollection symbolCollection = new SymbolCollection();
+            symbolCollection.Add(allSymbols[Symbols]);
+
+            return symbolCollection;
+        }
+
+        #endregion
+
+        #region PLCDataConvert
+        /// <summary>
+        /// 类型转换
+        /// </summary>
+        /// <param name="symbol"></param>
+        /// <param name="value"></param>
+        /// <returns></returns>
+        private object ValueToObject(ISymbol symbol,string value)
+        {
+            object data = null;
+            try
+            {
+                switch (symbol.TypeName)
+                {
+                    case "BOOL":
+                        data = bool.Parse(value);
+                        break;
+                    case "BYTE":
+                        data = byte.Parse(value);
+                        break;
+                    case "SINT":
+                        data = sbyte.Parse(value);
+                        break;
+                    case "INT":
+                        data = short.Parse(value);
+                        break;
+                    case "DINT":
+                        data = int.Parse(value);
+                        break;
+                    case "LINT":
+                        data = long.Parse(value);
+                        break;
+                    case "USINT":
+                        data = byte.Parse(value);
+                        break;
+                    case "UINT":
+                        data = ushort.Parse(value);
+                        break;
+                    case "UDINT":
+                        data = uint.Parse(value);
+                        break;
+                    case "ULINT":
+                        data = ulong.Parse(value);
+                        break;
+                    case "REAL":
+                        data = float.Parse(value);
+                        break;
+                    case "LREAL":
+                        data = double.Parse(value);
+                        break;
+                    case "WORD":
+                        data = ushort.Parse(value);
+                        break;
+                    case "DWORD":
+                        data = uint.Parse(value);
+                        break;
+                    case "TIME":
+                    case "TIME_OF_DAY":
+                    case "TOD":
+                        data = TimeSpan.Parse(value);
+                        break;
+                    case "DATE":
+                    case "DATE_AND_TIME":
+                    case "DT":
+                        data = DateTime.Parse(value);
+                        break;
+                    default:
+                        if (symbol.TypeName.StartsWith("STRING") || symbol.TypeName.StartsWith("WSTRING"))
+                        {
+                            data = value;
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                data = ex.Message;
+            }
+
+            return data;
+        }
+        private object ParsePlcVariableToJs(byte[] dataBuffer, DataType dataType)
+        {
+            if (dataType == null) return null;
+            else
+            {
+                //1.DataTypeId
+                AdsDataTypeDescription type = Types.types.Find(t => { return t.AdsDataType.Equals(dataType.DataTypeId); });
+                if (type == null)
+                {
+                    //2.name
+                    string name = dataType.Name.Trim();
+                    type = Types.types.Find(t => { return t.Names.Contains(name); });
+                    if (type == null)
+                    {
+                        //3.正则name
+                        MatchCollection match = null;
+                        type = Types.types.Find(t =>
+                        {
+                            Regex re = new Regex(@"^(" + string.Join("|", t.Names) + ")([\\[\\(](.*)[\\)\\]])*$", RegexOptions.IgnoreCase);
+                            match = re.Matches(name);
+                            return match != null;
+                        });
+                        //4.返回
+                        if (type == null)
+                            return null;
+                        if (type.AdsDataType == AdsDatatypeId.ADST_STRING)
+                        {
+                            type.Size = match[0].Groups[3] != null ? (int.Parse(match[0].Groups[3].Value) + 1) : type.Size;
+                        }
+                        else if (type.AdsDataType == AdsDatatypeId.ADST_WSTRING)
+                        {
+                            type.Size = match[0].Groups[3] != null ? (int.Parse(match[0].Groups[3].Value) * 2 + 2) : type.Size;
+                        }
+                    }
+                }
+                else
+                {
+                    type.Size = dataType.Size;
+                }
+
+                return type.FromBuffer(dataBuffer);
+            }
+        }
+        private object ParsePlcVariableToJs(byte[] dataBuffer, AdsDatatypeId dataTypeId)
+        {
+            return Types.types.Find(t => { return t.AdsDataType.Equals(dataTypeId); }).FromBuffer(dataBuffer);
+        }
+
+        /// <summary>
+        /// byte结果转换
+        /// </summary>
+        /// <param name="dataBuffer"></param>
+        /// <param name="symbol"></param>
+        private void ParsePlcDataToString(byte[] dataBuffer, ISymbol symbol)
+        {
+            _symbols.Clear();
+            ParseSymbol(symbol);
+            for (int i = 0; i < _symbols.Count; i++)
+            {
+                DataType dataType = (DataType)_symbols[i].DataType;
+                object result = ParsePlcVariableToJs(dataBuffer.Take(dataType.ByteSize).ToArray(), dataType.DataTypeId);
+                symbolValues.Add($"{_symbols[i].InstancePath}|{result}");
+                dataBuffer = dataBuffer.Skip(dataType.ByteSize).ToArray();
+            }
+        }
+        /// <summary>
+        /// 数组结果转换
+        /// </summary>
+        /// <param name="dataBuffer"></param>
+        /// <param name="symbol"></param>
+        private void ParsePlcDataToArrayString(string[] dataBuffer,ISymbol symbol)
+        {
+            _symbols.Clear();
+            ParseSymbol(symbol);
+            for (int i = 0; i < _symbols.Count; i++)
+            {
+                symbolValues.Add($"{_symbols[i].InstancePath}:={dataBuffer[i]}");
+            }
+        }
+
+       /// <summary>
+       /// 获取变量所有成员
+       /// </summary>
+       /// <param name="symbol"></param>
+        private void ParseSymbol(ISymbol symbol)
+        {
+            if (symbol.SubSymbols.Count<ISymbol>() > 0)
+            {
+                foreach (var item in symbol.SubSymbols)
+                {
+                    ParseSymbol(symbol);
+                }
+            }
+            else
+            {
+                if (!symbol.InstancePath.StartsWith(".."))
+                {
+                    _symbols.Add(symbol);
+                }
+            }
+        }
+        #endregion
+
+        #region 通知
+
+        public bool AdsNotificationEx()
+        {
+            bool result;
+            try
+            {
+                this.tcClient.AdsNotificationEx += this.tcClient_AdsNotificationEx;
+                //hd[1] = this.tcClient.AddDeviceNotificationEx("",NotificationSettings.Default,null,typeof(bool));
+                hd[1] = this.tcClient.AddDeviceNotificationEx(
+                    "", 
+                    AdsTransMode.OnChange,
+                    100,//采样间隔ms
+                    100,//最大延迟ms 
+                    null,//本地缓存变量，可以是hmi上的文本框变量 
+                    typeof(bool));
+
+                hd[2] = this.tcClient.AddDeviceNotificationEx(
+                    "",
+                    AdsTransMode.OnChange,
+                    100,//采样间隔ms
+                    100,//最大延迟ms 
+                    null,//本地缓存变量，可以是hmi上的文本框变量 
+                    typeof(bool));
+
+                result = true;
+            }
+            catch (Exception ex)
+            {
+                string message = ex.Message;
+                result = false;
+            }
+            return result;
+        }
+
+        private void tcClient_AdsNotificationEx(object sender,TwinCAT.Ads.AdsNotificationExEventArgs e)
+        {
+            if (e.NotificationHandle ==hd[1])
+            {
+                this.plcToXmlStart = (bool)e.Value;
+                if (this.plcToXmlStart)
+                {
+                    //执行函数
+                }
+            }
+            if (e.NotificationHandle == hd[2])
+            {
+                this.xmlToPlcStart = (bool)e.Value;
+                if (this.xmlToPlcStart)
+                {
+                    //执行函数
+                }
+            }
+            if (e.NotificationHandle == hd[2])
+            {
+                this.bootCopyStart = (bool)e.Value;
+                if (this.bootCopyStart)
+                {
+                    //执行函数
+                }
+            }
+        }
+
+        private void Timer_Elapsed(object sender, ElapsedEventArgs e)
+        {
+            this.timer.Enabled = false;
+            if (ReadBool("",tcClient))
+            {
+                WriteBool("", tcClient,false);
+                //执行方法
+            }
+            this.timer.Enabled = false;
+            if (ReadBool("", tcClient))
+            {
+                WriteBool("", tcClient, false);
+                //执行方法
+            }
+            this.timer.Enabled = false;
+            if (ReadBool("", tcClient))
+            {
+                WriteBool("", tcClient, false);
+                //执行方法
+            }
+        }
+
+        private bool ReadBool(string name, TcAdsClient tcAdsClient)
+        {
+            bool val = false;
+            try
+            {
+                if (tcClient!=null)
+                {
+                    int hd = tcClient.CreateVariableHandle(name);
+                    val = Convert.ToBoolean(tcClient.ReadAny(hd,typeof(bool)));
+                    tcClient.DeleteVariableHandle(hd);
+                }
+            }
+            catch (Exception )
+            {
+                
+            }
+            return val;
+        }
+
+        private void WriteBool(string name, TcAdsClient tcAdsClient,bool result)
+        {
+            try
+            {
+                if (tcClient != null)
+                {
+                    int hd = tcClient.CreateVariableHandle(name);
+                    tcClient.WriteAny(hd,result);
+                    tcClient.DeleteVariableHandle(hd);
+                }
+            }
+            catch (Exception)
+            {
+
+            }
+        }
+
+        #endregion
+
+        #region 监视
+
+        private readonly Dictionary<string, AdsVariableGroup> _variableGroups;
+        //private readonly Dictionary<string, NotificationHandle> _notificationHandles;
+        private readonly Dictionary<string, int> _variableHandles;
+        //public event EventHandler<VariableGroupChangedEventArgs> OnVariableGroupChanged;
+        private readonly CsvDataService _csvService;
+
+        public void AddVariableMonitor(string triggerVariable,string groupName,List<string> variablesToSave)
+        {
+            var group = new AdsVariableGroup
+            {
+                Name=groupName,
+                TriggerVariable = triggerVariable,
+                VariablesToSave=variablesToSave,
+                LastValues = new Dictionary<string, object>()
+            };
+
+            _variableGroups[groupName] = group;
+            //为触发变量注册通知
+            RegisterNotificationEx(triggerVariable,groupName);
+        }
+        /// <summary>
+        /// 注册通知
+        /// </summary>
+        /// <param name="triggerVariable"></param>
+        /// <param name="groupName"></param>
+        private void RegisterNotificationEx(string triggerVariable, string groupName)
+        {
+            try
+            {
+                // 创建委托用于回调
+                AdsNotificationExEventHandler callback = (sender, e) =>
+                    OnVariableChanged(sender, e, groupName, triggerVariable);
+             
+                // 注册通知
+                var notificationHandle = tcClient.AddDeviceNotificationEx(
+                    triggerVariable,
+                    AdsTransMode.OnChange,
+                     100,    // 循环时间(ms)
+                     0,      // 最大延迟(ms)
+                    callback,
+                    null
+                );
+
+                _variableHandles[triggerVariable] = notificationHandle;
+            }
+            catch (Exception ex)
+            {
+                string message = $"注册变量通知失败 {triggerVariable}: {ex.Message}";
+            }
+        }
+        /// <summary>
+        /// 变化执行事件
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        /// <param name="groupName"></param>
+        /// <param name="variableName"></param>
+        private void OnVariableChanged(object sender, AdsNotificationExEventArgs e, string groupName,string variableName)
+        {
+            if (!_variableGroups.TryGetValue(groupName,out var group))            
+                return;
+
+            try
+            {
+                //读取出发变量的新值
+                var triggerValue = e.Value;
+                //保存所有相关变量的当前值
+                var savedValues = new Dictionary<string, object>();
+                foreach (var variable in group.VariablesToSave)
+                {
+                    try
+                    {
+                        var value = ReadSingleSymbolStr(variable);
+                        savedValues[variable] = value;
+                    }
+                    catch (Exception)
+                    {
+                        savedValues[variable] = null;
+                    }
+                }
+
+                //触发事件
+                var eventArgs = new VariableGroupChangedEventArgs
+                {
+                    GroupName = groupName,
+                    TriggerVariable = group.TriggerVariable,
+                    TriggerValue = triggerValue,
+                    SavedValues = savedValues,
+                    Timestamp = DateTime.Now
+                };
+
+                //保存到csv
+                _csvService.SaveVariableGroupToCsv(eventArgs);
+
+            }
+            catch (Exception)
+            {
+
+                throw;
+            }
+            
+        }
+       
+
+        #endregion
+
+        #region 资源释放
+
+        private bool disposed = false;
+        
+
+        public void Dispose()
+        {           
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
+        }
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!this.disposed)
+            {
+                if (disposing)
+                {
+                    tcClient.Dispose();
+                    for (int i = 0; i < 100; i++)
+                    {
+                        tcClient.DeleteDeviceNotification(hd[i]);
+                    }                   
+                    IsConnected = false;
+                }
+                disposed = true;
+            }
+        }
+        ~ADSHelper()
+        {
+            Dispose(disposing: false);
+        }
+        #endregion
+
+    }
+    #region ADSType
+
+    public class AdsDataTypeDescription
+    {
+        public List<string> Names { get; set; }
+        public AdsDatatypeId AdsDataType { get; set; }
+        public int Size { get; set; }
+        public Func<byte[], object> FromBuffer { get; set; }
+    }
+
+    public class Types
+    {
+        public static List<AdsDataTypeDescription> types = new List<AdsDataTypeDescription>
+        {
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "WSTRING" },
+                AdsDataType = AdsDatatypeId.ADST_WSTRING,
+                Size = 162, // 默认大小  
+                FromBuffer = buffer => DecodeWString(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "STRING" },
+                AdsDataType = AdsDatatypeId.ADST_STRING,
+                Size = 81, // 默认大小  
+                FromBuffer = buffer => DecodeString(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "BOOL", "BIT", "BIT8" },
+                AdsDataType = AdsDatatypeId.ADST_BIT,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeBIT(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "BYTE", "USINT", "BITARR8", "UINT8"},
+                AdsDataType = AdsDatatypeId.ADST_UINT8,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeUINT8(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> {"SINT", "INT8" },
+                AdsDataType = AdsDatatypeId.ADST_INT8,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeINT8(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "UINT", "WORD", "BITARR16", "UINT16"},
+                AdsDataType = AdsDatatypeId.ADST_UINT16,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeUINT16(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "DINT", "INT32"},
+                AdsDataType = AdsDatatypeId.ADST_INT32,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeINT32(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> {"UDINT", "DWORD", "TIME", "TIME_OF_DAY", "TOD", "BITARR32", "UINT32" },
+                AdsDataType = AdsDatatypeId.ADST_UINT32,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeUINT32(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> {"DATE_AND_TIME", "DT", "DATE" },
+                AdsDataType = AdsDatatypeId.ADST_UINT32,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeUINT32(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> {"LREAL", "DOUBLE" },
+                AdsDataType = AdsDatatypeId.ADST_REAL64,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeREAL64(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "REAL", "FLOAT"},
+                AdsDataType = AdsDatatypeId.ADST_REAL32,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeREAL32(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> {"LWORD", "ULINT", "LTIME", "UINT64" },
+                AdsDataType = AdsDatatypeId.ADST_UINT64,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeUINT64(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "LINT", "INT64"},
+                AdsDataType = AdsDatatypeId.ADST_INT64,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeINT64(buffer)
+            },
+            new AdsDataTypeDescription
+            {
+                Names = new List<string> { "INT", "INT16"},
+                AdsDataType = AdsDatatypeId.ADST_INT16,
+                Size = 1, // 默认大小  
+                FromBuffer = buffer => DecodeINT16(buffer)
+            },
+        };
+
+        // 这里可以添加代码来使用上述定义的types列表，例如编码和解码值等。  
+        private static string DecodeString(byte[] buffer)
+        {
+            // 假设我们使用Unicode编码从字节数组解码字符串  
+            //return buffer == null ? "" : Encoding.ASCII.GetString(buffer).TrimEnd('\0');
+            try
+            {
+                int al = buffer.Count();
+                if (al <= 0)
+                {
+                    return null;
+                }
+                string s;
+                byte[] Buffer = new byte[al];
+                Array.Copy(buffer, 0, Buffer, 0, al);
+                string ss = Encoding.Default.GetString(Buffer);
+                s = cutSubstring(ss, ss.Length);
+                return s;
+            }
+            catch { return null; }
+        }
+        private static string DecodeWString(byte[] buffer)
+        {
+            // 假设我们使用Unicode编码从字节数组解码字符串  
+            try
+            {
+                int al = buffer.Count();
+                if (al <= 0)
+                {
+                    return null;
+                }
+                string s;
+                byte[] Buffer = new byte[al];
+                Array.Copy(buffer, 0, Buffer, 0, al);
+                string ss = Encoding.Unicode.GetString(Buffer);
+                s = cutSubstring(ss, ss.Length);
+                return s;
+            }
+            catch { return null; }
+        }
+        private static string DecodeBIT(byte[] buffer)
+        {
+            return BitConverter.ToBoolean(buffer, 0).ToString().ToLower();
+        }
+        private static byte DecodeUINT8(byte[] buffer)
+        {
+            return buffer[0];
+        }
+        private static sbyte DecodeINT8(byte[] buffer)
+        {
+            return (sbyte)buffer[0];
+        }
+        private static ushort DecodeUINT16(byte[] buffer)
+        {
+            return BitConverter.ToUInt16(buffer, 0);
+        }
+        private static short DecodeINT16(byte[] buffer)
+        {
+            return BitConverter.ToInt16(buffer, 0);
+        }
+        private static int DecodeINT32(byte[] buffer)
+        {
+            return BitConverter.ToInt32(buffer, 0);
+        }
+        private static uint DecodeUINT32(byte[] buffer)
+        {
+            return BitConverter.ToUInt32(buffer, 0);
+        }
+        private static float DecodeREAL32(byte[] buffer)
+        {
+            return BitConverter.ToSingle(buffer, 0);
+        }
+        private static double DecodeREAL64(byte[] buffer)
+        {
+            return BitConverter.ToDouble(buffer, 0);
+        }
+        private static ulong DecodeUINT64(byte[] buffer)
+        {
+            return BitConverter.ToUInt64(buffer, 0);
+        }
+        private static long DecodeINT64(byte[] buffer)
+        {
+            return BitConverter.ToInt64(buffer, 0);
+        }
+        private static string cutSubstring(string str, int length)
+        {
+            if (str == null || str.Length == 0 || length < 0)
+            {
+                return "";
+            }
+
+            byte[] bytes = Encoding.Unicode.GetBytes(str);
+            int n = 0;  //  表示当前的字节数
+            int i = 0;  //  要截取的字节数
+            for (; i < bytes.GetLength(0) && n < length; i++)
+            {
+                //  偶数位置，如0、2、4等，为UCS2编码中两个字节的第一个字节
+                if (i % 2 == 0)
+                {
+                    if ((bytes[i] == 0 && bytes[i + 1] == 0))
+                        break;
+                    n++;      //  在UCS2第一个字节时n加1
+                }
+                else
+                {
+                    //  当UCS2编码的第二个字节大于0时，该UCS2字符为汉字，一个汉字算两个字节
+                    if (bytes[i] > 0)
+                    {
+                        n++;
+                    }
+                }
+            }
+            //  如果i为奇数时，处理成偶数
+            if (i % 2 == 1)
+            {
+                //  该UCS2字符是汉字时，去掉这个截一半的汉字
+                if (bytes[i] > 0)
+                    i = i - 1;
+                //  该UCS2字符是字母或数字，则保留该字符
+                else
+                    i = i + 1;
+            }
+            return Encoding.Unicode.GetString(bytes, 0, i);
+        }
+    }
+    #endregion
+
+    public class AdsVariableGroup
+    {
+        public string Name { get; set; }
+        public string TriggerVariable { get; set; }
+        public List<string> VariablesToSave { get; set; }
+        public Dictionary<string, object> LastValues { get; set; }
+    }
+
+    public class VariableGroupChangedEventArgs : EventArgs
+    {
+        public string GroupName { get; set; }
+        public string TriggerVariable { get; set; }
+        public object TriggerValue { get; set; }
+        public Dictionary<string, object> SavedValues { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+}
+
