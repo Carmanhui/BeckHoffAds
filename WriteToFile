@@ -1,0 +1,31 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AdsHelper
+{
+   public static class WriteToFile
+    {
+        public static void ExportToFile(string filePath,List<string> contents)
+        {
+            File.WriteAllLines(filePath,contents);
+
+        }
+
+        public static void WriteToCsv(List<string> headers, List<string> data, string filepath)
+        {
+            using (var writer = new StreamWriter(filepath,false,Encoding.UTF8))
+            {
+                writer.WriteLine(string.Join(",",headers));
+                foreach (var row in data)
+                {
+                    //writer.WriteLine(string.Join(",",row));
+                    writer.WriteLine(row);
+                }
+            }
+        }
+    }
+}
