@@ -1,0 +1,157 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AdsHelper
+{
+    public class CsvDataService
+    {
+        private readonly string _csvDirectory;
+        private readonly string _baseFileName;
+        private readonly object _fileLock = new object();
+        private Dictionary<string, List<string>> _variableHeaders = new Dictionary<string, List<string>>();
+
+        public CsvDataService(string csvDirectory = "Data", string baseFileName = "ads_data")
+        {
+            _csvDirectory = csvDirectory;
+            _baseFileName = baseFileName;
+
+            // 确保目录存在
+            if (!Directory.Exists(_csvDirectory))
+            {
+                Directory.CreateDirectory(_csvDirectory);
+            }
+        }
+
+        public void SaveVariableGroupToCsv(VariableGroupChangedEventArgs data)
+        {
+            try
+            {
+                var fileName = GetDailyCsvFileName(data.GroupName);
+                var csvLine = ConvertToCsvLine(data);
+
+                lock (_fileLock)
+                {
+                    // 如果是新文件，写入表头
+                    if (!File.Exists(fileName) || !_variableHeaders.ContainsKey(data.GroupName))
+                    {
+                        var header = GenerateCsvHeader(data);
+                        File.WriteAllText(fileName, header + Environment.NewLine, Encoding.UTF8);
+                        _variableHeaders[data.GroupName] = data.SavedValues.Keys.ToList();
+                    }
+
+                    // 追加数据
+                    File.AppendAllText(fileName, csvLine + Environment.NewLine, Encoding.UTF8);
+                }
+
+                Console.WriteLine($"数据已保存到: {fileName}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"保存CSV失败: {ex.Message}");
+            }
+        }
+
+        private string GetDailyCsvFileName(string groupName)
+        {
+            var dateStamp = DateTime.Now.ToString("yyyyMMdd");
+            var safeGroupName = RemoveInvalidFileNameChars(groupName);
+            return Path.Combine(_csvDirectory, $"{_baseFileName}_{safeGroupName}_{dateStamp}.csv");
+        }
+
+        private string GenerateCsvHeader(VariableGroupChangedEventArgs data)
+        {
+            var headerFields = new List<string>
+        {
+            "Timestamp",
+            "GroupName",
+            "TriggerVariable",
+            "TriggerValue"
+        };
+
+            // 添加所有监控变量的列
+            foreach (var variableName in data.SavedValues.Keys.OrderBy(k => k))
+            {
+                var safeColumnName = RemoveInvalidCsvChars(variableName);
+                headerFields.Add(safeColumnName);
+            }
+
+            return string.Join(",", headerFields);
+        }
+
+        private string ConvertToCsvLine(VariableGroupChangedEventArgs data)
+        {
+            var fields = new List<string>
+            {
+                data.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                EscapeCsvField(data.GroupName),
+                EscapeCsvField(data.TriggerVariable),
+                EscapeCsvField(data.TriggerValue?.ToString() ?? "null")
+            };
+
+            // 添加所有监控变量的值（按变量名排序保持一致性）
+            foreach (var variableName in data.SavedValues.Keys.OrderBy(k => k))
+            {
+                var value = data.SavedValues[variableName];
+                fields.Add(EscapeCsvField(value?.ToString() ?? "null"));
+            }
+
+            return string.Join(",", fields);
+        }
+
+        private string EscapeCsvField(string field)
+        {
+            if (string.IsNullOrEmpty(field))
+                return "\"\"";
+
+            // 如果包含逗号、换行符或引号，需要用引号包围并转义内部引号
+            if (field.Contains(",") || field.Contains("\"") || field.Contains("\r") || field.Contains("\n"))
+            {
+                return "\"" + field.Replace("\"", "\"\"") + "\"";
+            }
+
+            return field;
+        }
+
+        private string RemoveInvalidFileNameChars(string filename)
+        {
+            var invalidChars = Path.GetInvalidFileNameChars();
+            return new string(filename.Where(ch => !invalidChars.Contains(ch)).ToArray());
+        }
+
+        private string RemoveInvalidCsvChars(string text)
+        {
+            return text.Replace(",", "_").Replace("\"", "_").Replace("\r", "").Replace("\n", "");
+        }
+
+        // 批量保存方法（可选）
+        public void BatchSaveToCsv(List<VariableGroupChangedEventArgs> dataList)
+        {
+            if (!dataList.Any()) return;
+
+            var groupName = dataList.First().GroupName;
+            var fileName = GetDailyCsvFileName(groupName);
+
+            lock (_fileLock)
+            {
+                var lines = new List<string>();
+
+                // 如果是新文件，添加表头
+                if (!File.Exists(fileName))
+                {
+                    lines.Add(GenerateCsvHeader(dataList.First()));
+                }
+
+                // 添加所有数据行
+                lines.AddRange(dataList.Select(ConvertToCsvLine));
+
+                File.AppendAllLines(fileName, lines, Encoding.UTF8);
+            }
+
+            Console.WriteLine($"批量保存 {dataList.Count} 条数据到: {fileName}");
+        }
+    }
+}
