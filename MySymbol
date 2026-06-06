@@ -1,0 +1,27 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AdsHelper
+{
+    public class MySymbol
+    {
+        public string Path { get; set; }
+        public string DataType { get; set; }
+        public string SystemType { get; set; }
+        public string BaseType { get; set; }
+        public string Values { get; set; }
+        public string ByteSize { get; set; }
+        public string ElementCount { get; set; }
+        public string Category { get; set; }
+    }
+
+    public class SimpleSymbol
+    {
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public string Values { get; set; }
+    }
+}
