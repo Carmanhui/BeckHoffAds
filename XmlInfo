@@ -1,0 +1,251 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+
+namespace AdsHelper
+{
+    internal static class XmlInfo
+    {
+        public static void DeleteOldXmlFile()
+        {
+            try
+            {
+                string path = "";
+                FileInfo[] fileInfos = new DirectoryInfo(path).GetFiles("*.xml");
+                if (fileInfos.Length>100)
+                {
+                    File.Delete((from f in fileInfos
+                                 orderby f.CreationTime descending
+                                 select f).Last<FileInfo>().FullName);
+                }
+            }
+            catch (Exception ex)
+            {
+                string message = ex.Message;
+            }
+        }
+
+        public static bool SaveXmlFile(List<MySymbol> symbols, string xmlName)
+        {
+            bool result;
+            try
+            {
+                if (symbols != null)
+                {
+                    if (symbols.Count > 0)
+                    {
+                        XDocument doc = new XDocument();
+                        XDeclaration dec = new XDeclaration("1.0", "GB2312", "yes");
+                        doc.Declaration = dec;
+                        XElement rootElement = new XElement("Parameter");
+                        doc.Add(rootElement);
+                        foreach (MySymbol item in symbols)
+                        {
+                            XElement symbolElt = new XElement("Symbol");
+                            symbolElt.SetAttributeValue("Name", item.Path);
+                            foreach (PropertyInfo propertyInfo in item.GetType().GetProperties())
+                            {
+                                XElement elt = new XElement(propertyInfo.Name);
+                                object val = propertyInfo.GetValue(item, null);
+                                elt.Value = Convert.ToString(val);
+                                symbolElt.Add(elt);
+                            }
+                            rootElement.Add(symbolElt);
+                        }
+                        doc.Save(XmlInfo.CreateXmlFile(xmlName));
+                        result = true;
+                    }
+                    else
+                    {
+                        result = false;
+                    }
+                }
+                else
+                {
+                    result = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                
+                result = false;
+            }
+            return result;
+        }
+
+        public static bool SaveXmlFile(List<SimpleSymbol> symbols, string xmlName)
+        {
+            bool result;
+            try
+            {
+                if (symbols != null)
+                {
+                    if (symbols.Count > 0)
+                    {
+                        XDocument doc = new XDocument();
+                        XDeclaration dec = new XDeclaration("1.0", "GB2312", "yes");
+                        doc.Declaration = dec;
+                        XElement rootElement = new XElement("Parameter");
+                        doc.Add(rootElement);
+                        foreach (SimpleSymbol item in symbols)
+                        {
+                            XElement symbolElt = new XElement("Symbol");
+                            symbolElt.SetAttributeValue("Name", item.Name);
+                            
+                            rootElement.Add(symbolElt);
+                        }
+                        doc.Save(XmlInfo.CreateXmlFile(xmlName));
+                        result = true;
+                    }
+                    else
+                    {
+                        result = false;
+                    }
+                }
+                else
+                {
+                    result = false;
+                }
+            }
+            catch (Exception ex)
+            {
+
+                result = false;
+            }
+            return result;
+        }
+
+        public static List<SimpleSymbol> ReadXmlToMyISymbolList(string xmlPath)
+        {
+            if (!(xmlPath != ""))
+            {
+                return null;
+            }
+
+            List<XElement> xels = XDocument.Load(xmlPath).Root.Elements().ToList<XElement>();
+            if (xels.Count>0)
+            {
+                List<SimpleSymbol> ls = new List<SimpleSymbol>();
+                foreach (XElement item in xels)
+                {
+                    SimpleSymbol symbol = new SimpleSymbol();
+                    try
+                    {
+                        symbol.Name = item.Element("Name")?.Value;
+                        symbol.Type = item.Element("Type")?.Value;
+                        symbol.Values = item.Element("Values")?.Value;
+                        ls.Add(symbol);
+                    }
+                    catch (Exception)
+                    {
+                        return null;
+                    }
+                }
+                return ls;
+            }
+            return null;
+        }
+
+
+        public  static string CreateXmlFile(string xmlName)
+        {
+            string rootDirPath = "c:\\PlcDataAutoSave(重要)";
+            if (!Directory.Exists(rootDirPath))
+            {
+                Directory.CreateDirectory(rootDirPath);
+            }
+
+            string dayXmlFilePath;
+            if (xmlName.Trim() != "")
+            {
+                dayXmlFilePath = rootDirPath + "\\" + xmlName + ".xml";
+
+            }
+            else
+            {
+                dayXmlFilePath = rootDirPath + "\\" + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss") + ".xml";
+            }
+            return dayXmlFilePath;
+        }
+
+        public static Dictionary<string, string> GetXmlNameDic()
+        {
+            string rootDirPath = "c:\\PlcDataAutoSave(重要)";
+            List<FileInfo> list = (from f in new DirectoryInfo(rootDirPath).GetFiles("*.xml")
+                                   orderby f.CreationTime descending
+                                   select f).ToList<FileInfo>();
+
+            Dictionary<string, string> dic = new Dictionary<string, string>();
+            foreach (FileInfo path in list)
+            {
+                string key = Path.GetFileNameWithoutExtension(path.FullName);
+                try
+                {
+                    dic.Add(key,path.FullName);
+                }
+                catch (Exception ex)
+                {
+
+                }
+            }
+            return dic;
+
+        }
+
+        private static List<string> GetFiles(string path, string[] patterns)
+        {
+            List<string> files = new List<string>();
+            try
+            {
+                foreach (string pattern in patterns)
+                {
+                    foreach (string file in Directory.GetFiles(path,pattern))
+                    {
+                        files.Add(file);
+                    }
+                }
+                foreach (string dictory in Directory.GetDirectories(path))
+                {
+                    files.AddRange(XmlInfo.GetFiles(dictory,patterns));
+                }
+            }
+            catch (Exception)
+            {
+
+            }
+            return files;
+        }
+
+        public static Dictionary<string, string> GetConfigSymbolInfoDic()
+        {
+            Dictionary<string, string> dic = null;
+            try
+            {
+                if (File.Exists("config.xml"))
+                {
+                    XElement rootElt = XDocument.Load("config.xml").Root;
+                    if (rootElt.Elements()!=null)
+                    {
+                        dic = new Dictionary<string, string>();
+                        foreach (XElement element in rootElt.Elements())
+                        {
+                            string key = element.Attribute("Name").Value;
+                            string value = element.Value.ToLower();
+                            dic.Add(key,value);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            return dic;
+        }
+    }
+}
