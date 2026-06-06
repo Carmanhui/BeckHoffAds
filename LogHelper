@@ -1,0 +1,37 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace AdsHelper
+{
+    public static class LogHelper
+    {
+        public static void WriteLog(string txt)
+        {
+            string logDirPath = "\\Log";
+            if (!Directory.Exists(logDirPath))
+            {
+                Directory.CreateDirectory(logDirPath);
+            }
+
+            string logFilePath = logDirPath + "\\" + DateTime.Now.ToString("yyyy-MM-dd")+".txt";
+            if (!File.Exists(logFilePath))
+            {
+                File.WriteAllText(logFilePath,string.Empty);
+            }
+
+            string originalContent = File.ReadAllText(logFilePath);
+            string tempPath = "temp.txt";
+            using (StreamWriter sw = new StreamWriter(tempPath))
+            {
+                sw.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "     " + txt);
+                sw.WriteLine(originalContent);
+            }
+            File.Delete(logFilePath);
+            File.Move(tempPath,logFilePath);
+        }
+    }
+}
